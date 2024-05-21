@@ -1,0 +1,349 @@
+
+## qsub command: snakemake -s main.snake --sdm conda --executor cluster-generic --cluster-generic-submit-cmd "qsub -P bf528 -pe omp 16" --jobs 13
+
+CONDITIONS=['ATACrep3','ATACrep4']
+REPS=['R1', 'R2']
+
+#retreive NexteraPE:
+# wget https://raw.githubusercontent.com/timflutre/trimmomatic/master/adapters/NexteraPE-PE.fa
+
+rule all:
+    input:
+        'results/annotated_peaks.txt',
+        expand('results/{condition}_plot_genome.png', condition = CONDITIONS)
+        
+rule fastqc:
+    input:
+        fq='data/{condition}_{rep}.fastq.gz',
+    output:
+        fc='results/{condition}_{rep}_fastqc.html',
+    params:
+        outdir='results/',
+    threads: 4
+    conda:
+        'envs/fastqc_env.yml'
+    shell:
+        '''
+		fastqc {input.fq} -o {params.outdir}
+        '''
+
+rule trimmomatic:
+    input:
+        read1='data/{condition}_R1.fastq.gz',
+        read2='data/{condition}_R2.fastq.gz',
+    output:
+        outfiles=['results/{condition}_fwP.fastq.gz', 'results/{condition}_fwUP.fastq.gz', 'results/{condition}_revP.fastq.gz', 'results/{condition}_revUP.fastq.gz']
+    threads: 8
+    conda:
+        'envs/trimmomatic_env.yml'
+    shell:
+        '''
+        trimmomatic PE -threads {threads} {input.read1} {input.read2} {output.outfiles}  ILLUMINACLIP:NexteraPE-PE.fa:2:30:10 MINLEN:30
+        '''
+
+rule fastqc_trimmed:   
+    input:
+        infiles=['results/{condition}_fwP.fastq.gz', 'results/{condition}_fwUP.fastq.gz', 'results/{condition}_revP.fastq.gz', 'results/{condition}_revUP.fastq.gz'],
+    output:
+        fc=['results/{condition}_fwP_fastqc.html', 'results/{condition}_fwUP_fastqc.html', 'results/{condition}_revP_fastqc.html', 'results/{condition}_revUP_fastqc.html'],
+    params:
+        outdir='results/',
+    threads: 4
+    conda:
+        'envs/fastqc_env.yml'
+    shell:
+        '''
+		fastqc {input.infiles} -o {params.outdir}
+        '''
+
+rule multiqc_trimmed:
+	input:
+		fc=expand(['results/{condition}_fwP_fastqc.html', 'results/{condition}_fwUP_fastqc.html', 'results/{condition}_revP_fastqc.html', 'results/{condition}_revUP_fastqc.html'], condition=CONDITIONS)
+	output:
+		'results/multiqc_report.html'
+	params:
+		outdir='results/'
+	conda:
+		'envs/multiqc_env.yml'
+	shell:
+		'''
+			multiqc {params.outdir} -f -o {params.outdir}
+		'''
+
+rule bowtie2_align:
+    input:
+        readsP1='results/{condition}_fwP.fastq.gz',
+        readsP2='results/{condition}_revP.fastq.gz',
+    output:
+        bamfiles='results/{condition}.aligned.bam'
+    threads: 16
+    params:
+        gen_dir=directory('index/'),
+    conda:
+        'envs/bowtie2_env.yml'
+    shell:
+        '''
+        bowtie2 --very-sensitive -X 2000 -k 10 -p {threads} -x {params.gen_dir}Genome -1 {input.readsP1} -2 {input.readsP2} | samtools view -bS > {output.bamfiles}
+        '''
+
+rule samtools_sortIndex:
+    input:
+        bamfiles='results/{condition}.aligned.bam'
+    output:
+        sortbam='results/{condition}.aligned.sorted.bam',
+        stats='results/{condition}.aligned.idxstat'
+    threads: 16
+    conda:
+        'envs/samtools_env.yml'
+    shell:
+        '''
+        samtools sort --threads {threads} -o {output.sortbam} {input.bamfiles}
+        samtools index {output.sortbam}
+        samtools idxstats {output.sortbam} > {output.stats}
+        '''
+
+rule remove_MT:
+    input:
+        bamfiles='results/{condition}.aligned.sorted.bam'
+    output:
+        noMTbam='results/{condition}.NOmt.aligned.bam',
+    threads: 16
+    conda:
+        'envs/samtools_env.yml'
+    shell:
+        '''
+        samtools view -h {input.bamfiles} | grep -v "chrM" | samtools view -b > {output.noMTbam}
+        '''
+
+#use the idexstat files for deliverable #2 -- sample name, lenth, mapped, unmapped
+rule index_noMT:
+    input:
+        noMTbam='results/{condition}_NOmt.aligned.bam'
+    output:
+        sortbam='results/{condition}.NOmt.aligned.sorted.indexed.bam',
+        stats='results/{condition}.NOmt.aligned.idxstat'
+    threads: 16
+    conda:
+        'envs/samtools_env.yml'
+    shell:
+        ''' 
+        samtools sort --threads {threads} -o {output.sortbam} {input.noMTbam}
+        samtools index {output.sortbam}
+        samtools idxstats {output.sortbam} > {output.stats}
+        '''
+
+rule shift_reads:
+    input:
+        bamfiles='results/{condition}.NOmt.aligned.sorted.bam'
+    output:
+        filtered_bam='results/{condition}.NOmt.aligned.filtered.bam'
+    threads: 16
+    conda:
+        'envs/deeptools_env.yml'
+    shell:
+        '''
+        alignmentSieve -b {input.bamfiles} -o {output.filtered_bam} --ATACshift
+        '''
+
+rule index_shifted:
+    input:
+        noMTbam='results/{condition}.NOmt.aligned.filtered.bam'
+    output:
+        sortbam='results/{condition}.NOmt.filtered.sorted.bam',
+    threads: 16
+    conda:
+        'envs/samtools_env.yml'
+    shell:
+        ''' 
+        samtools sort --threads {threads} -o {output.sortbam} {input.noMTbam}
+        samtools index {output.sortbam}
+        '''
+
+rule ATACseqQC:
+    input: 
+        bam='results/{condition}.NOmt.filtered.sorted.bam'
+    output: 
+        png='results/{condition}_FragDistPlot.png'
+    threads: 4
+    conda: 
+        'envs/ATACseqQC_env.yml'
+    shell:
+        '''
+        Rscript ./ATAC_QC.R {input.bam} {output.png}
+        '''
+
+rule call_peaks:
+    input:
+        bam='results/{condition}.NOmt.filtered.sorted.bam'
+    conda:
+        'envs/macs3_env.yml'
+    output:
+        outfile='{condition}_sorted_peaks.xls'
+    params:
+        name='{condition}_sorted',
+        outdir=directory('results/peaks/')
+    shell:
+        '''
+        #mkdir -p {params.outdir}
+        macs3 callpeak -f BAMPE -t {input.bam} -g hs -n {params.name} -B -q 0.01 --outdir {params.outdir}
+        '''
+
+rule bamCoverage:
+	input:
+		sorted_bam='results/{condition}.NOmt.filtered.sorted.bam',
+	output:
+		outfile='results/{condition}_coverage.bw'
+	threads: 4
+	conda:
+		'envs/deeptools_env.yml'
+	shell:
+		'''
+		bamCoverage -b {input.sorted_bam} -o {output.outfile}
+		'''
+
+rule multiBwSummary:
+	input:
+		bwfile=expand('results/{condition}_coverage.bw', condition=CONDITIONS)
+	output:
+		outfile='results/bwsummary.npz'
+	conda:
+		'envs/deeptools_env.yml'
+	shell:
+		'''
+		multiBigwigSummary bins -b {input.bwfile} -o {output.outfile}
+		'''
+
+rule plotCorrelation:
+	input:
+		bwsumm='results/bwsummary.npz'
+	output:
+		plot='results/heatmap.png'
+	params:
+	conda:
+		'envs/deeptools_env.yml'
+	shell:
+		'''
+		plotCorrelation -in {input.bwsumm} -c pearson -p heatmap -o {output.plot}
+		'''
+
+rule intersect_peaks: 
+	input:
+		R3='results/peaks/ATACrep3_sorted_peaks.narrowPeak',
+		R4='results/peaks/ATACrep4_sorted_peaks.narrowPeak'
+	output:
+		outfile='results/intersect_2.bed'
+	conda:
+		'envs/bedtools_env.yml'
+	shell:
+		'''
+		bedtools intersect -a {input.R3} -b {input.R4} -f 0.5 -r -bed > {output.outfile}
+		'''
+
+rule filter_blacklist:   #removed 658 peaks
+	input:
+		alist='results/intersect_2.bed',
+		blist='hg38-blacklist.v2.bed'
+	output:
+		outfile='results/intersect_filtered_2.bed'
+	conda:
+		'envs/bedtools_env.yml'
+	shell:
+		'''
+		bedtools intersect -a {input.alist} -b {input.blist} -v -bed > {output.outfile}
+		'''
+
+#fixed, GO makes several txt files-- all in geneOntology.html
+rule annotate_peaks:
+	input:
+		peaks='results/intersect_filtered_2.bed',
+	output:
+		outfile='results/annotated_peaks.txt'
+	conda:
+		'envs/homer_env.yml'
+	shell:
+		'''
+		annotatePeaks.pl {input.peaks} hg38 -go results/ > {output.outfile}
+		'''
+ 
+rule motifs:
+	input:
+		peaks='results/intersect_filtered_2.bed',
+		fa='GRCh38.primary_assembly.genome.fa'
+	output:
+		outdir=directory('results/motifs')
+	conda:
+		'envs/homer_env.yml'
+	shell:
+		'''
+			mkdir {output.outdir}
+			findMotifsGenome.pl {input.peaks} {input.fa} {output.outdir} -size 200
+		'''
+
+rule bamCoverage_NFR:
+	input:
+		sorted_bam='results/{condition}.NOmt.filtered.sorted.bam',
+	output:
+		outfile='results/NFR_{condition}_coverage.bw'
+	threads: 4
+	conda:
+		'envs/deeptools_env.yml'
+	shell:
+		'''
+		bamCoverage -b {input.sorted_bam} --maxFragmentLength 99 -o {output.outfile}
+		'''
+
+rule bamCoverage_Mononucleosome:
+    input:
+        sorted_bam='results/{condition}.NOmt.filtered.sorted.bam',
+    output:
+        outfile='results/Mononucleosome_{condition}_coverage.bw'
+    threads: 4
+    conda:
+        'envs/deeptools_env.yml'
+    shell:
+        '''
+        bamCoverage -b {input.sorted_bam} --minFragmentLength 180 --maxFragmentLength 247 -o {output.outfile}
+        '''
+
+rule bamCoverage_NBR:
+	input:
+		sorted_bam='results/{condition}.NOmt.filtered.sorted.bam',
+	output:
+		outfile='results/NBR_{condition}_coverage.bw'
+	threads: 4
+	conda:
+		'envs/deeptools_env.yml'
+	shell:
+		'''
+		bamCoverage -b {input.sorted_bam} --minFragmentLength 100 -o {output.outfile}
+		'''
+
+rule computeMatrix_TSS:
+    input:
+        infile1='results/NBR_{condition}_coverage.bw',
+        infile2='results/NFR_{condition}_coverage.bw',
+        infile3='results/Mononucleosome_{condition}_coverage.bw',
+        bed='results/hg38_genes.bed'
+    output:
+        outfile='results/{condition}_mat.tab'
+    conda:
+        'envs/deeptools_env.yml'
+    threads: 4
+    shell:
+        '''
+        computeMatrix reference-point -S {input.infile1} {input.infile2} {input.infile3} -R {input.bed} -a 1000 -b 1000 -bl hg38-blacklist.v2.bed --skipZeros --outFileName {output.outfile}
+        '''
+
+#add --samplesLabel and --plotTitle
+rule plotMatrix_TSS: 
+	input:
+		mat='results/{condition}_mat.tab'
+	output:
+		plot='results/{condition}_plot_genome.png'
+	conda:
+		'envs/deeptools_env.yml'
+	shell:
+		'''
+		plotProfile -m {input.mat} --perGroup --colors red blue gray -o {output.plot}
+		'''
+
