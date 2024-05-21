@@ -1,0 +1,18 @@
+channels:  # Additional Conda channels to search for packages
+  - defaults
+  - bioconda
+  - conda-forge
+
+dependencies:  # List of packages to be installed in the environment
+  - r-base=4.1.1    # Specify R version
+  - bioconductor-atacseqqc
+  - bioconductor-diffbind
+  - bioconductor-genomation
+  - bioconductor-derfinder
+  - bioconductor-bsgenome.hsapiens.ucsc.hg38
+  - bioconductor-TxDb.Hsapiens.UCSC.hg38.knownGene
+  - r-ggplot2
+  - bioconductor-Rsamtools
+  - bioconductor-chippeakanno
+  - bioconductor-genomicalignments
+  - bioconductor-motifdb

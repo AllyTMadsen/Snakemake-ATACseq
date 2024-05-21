@@ -1,0 +1,9 @@
+
+channels:  
+  - defaults
+  - bioconda
+  - conda-forge
+
+dependencies:  
+  - python=3.12
+  - macs3=3.0.1
